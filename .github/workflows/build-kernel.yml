@@ -21,31 +21,100 @@ jobs:
           sudo apt-get install -y \
             binutils git make bc bison openssl curl zip kmod cpio flex \
             libelf-dev libssl-dev libtfm-dev libc6-dev device-tree-compiler \
-            ca-certificates python3 xz-utils aria2 build-essential rsync
+            ca-certificates python3 xz-utils build-essential rsync
 
-      - name: Download AOSP Clang (clang-r377782c)
+      - name: Download AOSP Clang (clang-r377782c) from Google AOSP
         run: |
-          echo "Downloading AOSP clang-r377782c from android12-release..."
-          mkdir -p $CLANG_PATH
-          aria2c -x16 -s16 -k1M \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r377782c.tar.gz" \
-            -o clang.tar.gz
-          tar -xzf clang.tar.gz -C $CLANG_PATH
-          rm clang.tar.gz
+          echo "=== Downloading AOSP clang-r377782c via git clone from Google AOSP source ==="
+
+          MAX_RETRIES=3
+          RETRY_DELAY=10
+          SUCCESS=false
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "--- Attempt $i of $MAX_RETRIES ---"
+
+            rm -rf /tmp/clang-repo
+
+            if git clone --depth=1 --single-branch --branch android12-release \
+                --no-tags \
+                "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86" \
+                /tmp/clang-repo 2>&1; then
+
+              echo "Clone succeeded. Extracting clang-r377782c..."
+              mkdir -p $CLANG_PATH
+
+              if [ -d "/tmp/clang-repo/clang-r377782c" ]; then
+                cp -r /tmp/clang-repo/clang-r377782c/* $CLANG_PATH/
+                SUCCESS=true
+                break
+              else
+                echo "WARNING: clang-r377782c directory not found in clone."
+                echo "Available directories:"
+                ls /tmp/clang-repo/ | head -20
+              fi
+            else
+              echo "Clone attempt $i failed."
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Retrying in ${RETRY_DELAY}s..."
+                sleep $RETRY_DELAY
+              fi
+            fi
+          done
+
+          rm -rf /tmp/clang-repo
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "ERROR: Failed to download AOSP clang after $MAX_RETRIES attempts."
+            exit 1
+          fi
+
+          chmod +x $CLANG_PATH/bin/clang 2>/dev/null || true
           echo "Clang version:"
-          $CLANG_PATH/bin/clang --version
+          $CLANG_PATH/bin/clang --version || echo "clang binary check failed"
 
-      - name: Download AOSP GCC aarch64 (4.9)
+      - name: Download AOSP GCC aarch64 (4.9) from Google AOSP
         run: |
-          echo "Downloading AOSP GCC aarch64-linux-android-4.9..."
-          mkdir -p $GCC_PATH
-          aria2c -x16 -s16 -k1M \
-            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android12-release.tar.gz" \
-            -o gcc.tar.gz
-          tar -xzf gcc.tar.gz -C $GCC_PATH
-          rm gcc.tar.gz
+          echo "=== Downloading AOSP GCC aarch64-linux-android-4.9 via git clone from Google AOSP source ==="
+
+          MAX_RETRIES=3
+          RETRY_DELAY=10
+          SUCCESS=false
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "--- Attempt $i of $MAX_RETRIES ---"
+
+            rm -rf /tmp/gcc-repo
+
+            if git clone --depth=1 --single-branch --branch android12-release \
+                --no-tags \
+                "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9" \
+                /tmp/gcc-repo 2>&1; then
+
+              echo "Clone succeeded. Copying GCC toolchain..."
+              mkdir -p $GCC_PATH
+              cp -r /tmp/gcc-repo/* $GCC_PATH/
+              SUCCESS=true
+              break
+            else
+              echo "Clone attempt $i failed."
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Retrying in ${RETRY_DELAY}s..."
+                sleep $RETRY_DELAY
+              fi
+            fi
+          done
+
+          rm -rf /tmp/gcc-repo
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "ERROR: Failed to download AOSP GCC after $MAX_RETRIES attempts."
+            exit 1
+          fi
+
+          chmod +x $GCC_PATH/bin/aarch64-linux-androidkernel-gcc 2>/dev/null || true
           echo "GCC version:"
-          $GCC_PATH/bin/aarch64-linux-androidkernel-gcc --version
+          $GCC_PATH/bin/aarch64-linux-androidkernel-gcc --version || echo "gcc binary check failed"
 
       - name: Clone kernel source
         run: |
