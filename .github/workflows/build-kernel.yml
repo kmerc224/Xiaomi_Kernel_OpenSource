@@ -1,0 +1,156 @@
+name: Build Alioth Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Kernel (alioth_user_defconfig)
+    runs-on: ubuntu-20.04
+    timeout-minutes: 360
+
+    env:
+      KERNEL_DIR: ${{ github.workspace }}/kernel
+      CLANG_PATH: ${{ github.workspace }}/toolchains/clang-r377782c
+      GCC_PATH: ${{ github.workspace }}/toolchains/gcc-aarch64
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils git make bc bison openssl curl zip kmod cpio flex \
+            libelf-dev libssl-dev libtfm-dev libc6-dev device-tree-compiler \
+            ca-certificates python3 xz-utils aria2 build-essential rsync
+
+      - name: Download AOSP Clang (clang-r377782c)
+        run: |
+          echo "Downloading AOSP clang-r377782c from android12-release..."
+          mkdir -p $CLANG_PATH
+          aria2c -x16 -s16 -k1M \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r377782c.tar.gz" \
+            -o clang.tar.gz
+          tar -xzf clang.tar.gz -C $CLANG_PATH
+          rm clang.tar.gz
+          echo "Clang version:"
+          $CLANG_PATH/bin/clang --version
+
+      - name: Download AOSP GCC aarch64 (4.9)
+        run: |
+          echo "Downloading AOSP GCC aarch64-linux-android-4.9..."
+          mkdir -p $GCC_PATH
+          aria2c -x16 -s16 -k1M \
+            "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android12-release.tar.gz" \
+            -o gcc.tar.gz
+          tar -xzf gcc.tar.gz -C $GCC_PATH
+          rm gcc.tar.gz
+          echo "GCC version:"
+          $GCC_PATH/bin/aarch64-linux-androidkernel-gcc --version
+
+      - name: Clone kernel source
+        run: |
+          echo "Cloning kernel source from MiCode/Xiaomi_Kernel_OpenSource (alioth-r-oss)..."
+          git clone --depth=1 -b alioth-r-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git $KERNEL_DIR
+
+      - name: Build kernel
+        run: |
+          cd $KERNEL_DIR
+
+          # Build configuration from build.config.common + build.config.aarch64
+          export ARCH=arm64
+          export CC=$CLANG_PATH/bin/clang
+          export LD=$CLANG_PATH/bin/ld.lld
+          export NM=$CLANG_PATH/bin/llvm-nm
+          export OBJCOPY=$CLANG_PATH/bin/llvm-objcopy
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=$GCC_PATH/bin/aarch64-linux-androidkernel-
+          export PATH=$CLANG_PATH/bin:$GCC_PATH/bin:$PATH
+
+          echo "========================================="
+          echo "Build Configuration Summary"
+          echo "========================================="
+          echo "ARCH:          $ARCH"
+          echo "CC:            $CC"
+          echo "LD:            $LD"
+          echo "CLANG_TRIPLE:  $CLANG_TRIPLE"
+          echo "CROSS_COMPILE: $CROSS_COMPILE"
+          echo "DEFCONFIG:     vendor/alioth_user_defconfig"
+          echo "========================================="
+
+          # Step 1: Apply defconfig
+          echo "[1/3] Applying vendor/alioth_user_defconfig..."
+          make O=out vendor/alioth_user_defconfig
+
+          # Step 2: Build kernel image + modules
+          echo "[2/3] Building kernel image and modules..."
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            CC=$CC \
+            LD=$LD \
+            NM=$NM \
+            OBJCOPY=$OBJCOPY \
+            CLANG_TRIPLE=$CLANG_TRIPLE \
+            CROSS_COMPILE=$CROSS_COMPILE
+
+          # Step 3: Install modules
+          echo "[3/3] Installing modules..."
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            CC=$CC \
+            LD=$LD \
+            NM=$NM \
+            OBJCOPY=$OBJCOPY \
+            CLANG_TRIPLE=$CLANG_TRIPLE \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            INSTALL_MOD_PATH=./out/modules \
+            INSTALL_MOD_STRIP=1 \
+            modules_install
+
+          echo "Build completed successfully!"
+
+      - name: Collect build artifacts
+        if: always()
+        run: |
+          mkdir -p ${{ github.workspace }}/output
+
+          # Kernel image
+          if [ -f $KERNEL_DIR/out/arch/arm64/boot/Image.gz ]; then
+            cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz ${{ github.workspace }}/output/
+            echo "Image.gz: $(ls -lh $KERNEL_DIR/out/arch/arm64/boot/Image.gz)"
+          fi
+
+          # vmlinux
+          if [ -f $KERNEL_DIR/out/vmlinux ]; then
+            cp $KERNEL_DIR/out/vmlinux ${{ github.workspace }}/output/
+            echo "vmlinux: $(ls -lh $KERNEL_DIR/out/vmlinux)"
+          fi
+
+          # System.map
+          if [ -f $KERNEL_DIR/out/System.map ]; then
+            cp $KERNEL_DIR/out/System.map ${{ github.workspace }}/output/
+          fi
+
+          # Kernel config
+          if [ -f $KERNEL_DIR/out/.config ]; then
+            cp $KERNEL_DIR/out/.config ${{ github.workspace }}/output/
+          fi
+
+          # Kernel modules
+          if [ -d $KERNEL_DIR/out/modules ]; then
+            cp -r $KERNEL_DIR/out/modules ${{ github.workspace }}/output/
+          fi
+
+          # List all .ko modules
+          echo ""
+          echo "=== Built kernel modules ==="
+          find $KERNEL_DIR/out -name "*.ko" | head -50
+          echo "Total modules: $(find $KERNEL_DIR/out -name '*.ko' | wc -l)"
+
+      - name: Upload kernel artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alioth-kernel-output
+          path: ${{ github.workspace }}/output/
+          if-no-files-found: warn
